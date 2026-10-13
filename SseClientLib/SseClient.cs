@@ -19,7 +19,7 @@ public class SseClient : IDisposable
 
         var builder = new UriBuilder(endpointBase);
         var existingQuery = builder.Query.TrimStart('?');
-        var endpointQuery = $"{Uri.EscapeDataString(query)}";
+        var endpointQuery = query;
 
         builder.Query = string.IsNullOrEmpty(existingQuery)
             ? endpointQuery
