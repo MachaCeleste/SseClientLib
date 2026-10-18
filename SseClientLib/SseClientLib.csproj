@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Title>SSEClientLib</Title>
-    <Version>0.1.1</Version>
+    <Version>0.1.5</Version>
     <Authors>Macha Celeste</Authors>
     <Company>Celestial Corp</Company>
   </PropertyGroup>

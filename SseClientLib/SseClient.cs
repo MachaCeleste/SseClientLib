@@ -9,13 +9,18 @@ public class SseClient : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private bool _disposed;
 
+    public event Action? OnConnected;
+    public event Action? OnDisconnected;
+
     public event Action<string>? OnRawMessageReceived;
+
     public event Action<string>? OnLog;
+    public event Action<string, Exception>? OnError;
 
     public SseClient(string endpointBase, string query)
     {
         if (!Uri.TryCreate(endpointBase, UriKind.Absolute, out var uri))
-            throw new ArgumentException("Endpoint must be an absolute URL.", nameof(endpointBase));
+            throw new ArgumentException("[SSE] Endpoint must be an absolute URL.", nameof(endpointBase));
 
         var builder = new UriBuilder(endpointBase);
         var existingQuery = builder.Query.TrimStart('?');
@@ -37,7 +42,7 @@ public class SseClient : IDisposable
         request.Headers.Accept.Add(
             new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
-        OnLog?.Invoke($"Connecting...");
+        OnLog?.Invoke($"[SSE] Connecting...");
 
         HttpResponseMessage response;
         try
@@ -48,19 +53,21 @@ public class SseClient : IDisposable
         }
         catch (Exception ex)
         {
-            OnLog?.Invoke($"Connection Error: {ex}");
+            OnError?.Invoke($"[SSE] Connection Error: {ex.Message}", ex);
             throw;
         }
 
         if (!response.IsSuccessStatusCode)
         {
-            OnLog?.Invoke($"HTTP Status: {(int)response.StatusCode} {response.StatusCode}");
-            throw new HttpRequestException($"{(int)response.StatusCode} {response.StatusCode}");
+            var ex = new HttpRequestException($"{(int)response.StatusCode} {response.StatusCode}");
+            OnError?.Invoke($"[SSE] HTTP Error: {ex.Message}", ex);
+            throw ex;
         }
 
         response.EnsureSuccessStatusCode();
 
-        OnLog?.Invoke($"Connected!");
+        OnLog?.Invoke($"[SSE] Connected!");
+        OnConnected?.Invoke();
 
         await using var stream = await response.Content.ReadAsStreamAsync(linkedCts.Token);
         using var reader = new StreamReader(stream);
@@ -93,6 +100,8 @@ public class SseClient : IDisposable
         }
 
         DispatchMessage(dataLines);
+        OnLog?.Invoke("[SSE] Disconnected!");
+        OnDisconnected?.Invoke();
     }
 
     private void DispatchMessage(List<string> dataLines)
