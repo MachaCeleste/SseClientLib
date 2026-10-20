@@ -1,15 +1,13 @@
-﻿
-using System;
-using System.Collections.Generic;
+﻿using System;
 using System.IO;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
 
 namespace SseClientLib
 {
-
     public class SseClient : IDisposable
     {
         private readonly HttpClient _client;
@@ -17,28 +15,33 @@ namespace SseClientLib
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
         private bool _disposed;
 
+        private readonly TimeSpan _keepAliveTimeout;
+
         public event Action OnConnected;
         public event Action OnDisconnected;
 
+        public event Action OnPing;
         public event Action<string> OnRawMessageReceived;
 
         public event Action<string> OnLog;
         public event Action<string, Exception> OnError;
 
-        public SseClient(string endpointBase, string query)
+        public SseClient(string endpointBase, string query, TimeSpan? keepAliveTimeout = null)
         {
-            if (!Uri.TryCreate(endpointBase, UriKind.Absolute, out var uri))
+            if (string.IsNullOrWhiteSpace(endpointBase))
+                throw new ArgumentException("Endpoint cannot be null or empty.", nameof(endpointBase));
+
+            if (!Uri.TryCreate(endpointBase, UriKind.Absolute, out _))
                 throw new ArgumentException("[SSE] Endpoint must be an absolute URL.", nameof(endpointBase));
 
             var builder = new UriBuilder(endpointBase);
             var existingQuery = builder.Query.TrimStart('?');
-            var endpointQuery = query;
 
             builder.Query = string.IsNullOrEmpty(existingQuery)
-                ? endpointQuery
-                : $"{existingQuery}&{endpointQuery}";
+                ? query : $"{existingQuery}&{query}";
 
             _endpoint = builder.Uri;
+            _keepAliveTimeout = keepAliveTimeout ?? TimeSpan.FromSeconds(30);
             _client = new HttpClient();
         }
 
@@ -47,8 +50,7 @@ namespace SseClientLib
             var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
 
             var request = new HttpRequestMessage(HttpMethod.Get, _endpoint);
-            request.Headers.Accept.Add(
-                new MediaTypeWithQualityHeaderValue("text/event-stream"));
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
             OnLog?.Invoke($"[SSE] Connecting...");
 
@@ -59,6 +61,11 @@ namespace SseClientLib
                     HttpCompletionOption.ResponseHeadersRead,
                     linkedCts.Token);
             }
+            catch (OperationCanceledException)
+            {
+                OnLog?.Invoke($"[SSE] Connection canceled.");
+                throw;
+            }
             catch (Exception ex)
             {
                 OnError?.Invoke($"[SSE] Connection Error: {ex.Message}", ex);
@@ -67,23 +74,64 @@ namespace SseClientLib
 
             if (!response.IsSuccessStatusCode)
             {
-                var ex = new HttpRequestException($"{(int)response.StatusCode} {response.StatusCode}");
-                OnError?.Invoke($"[SSE] HTTP Error: {ex.Message}", ex);
+                var ex = new HttpRequestException($"[SSE] HTTP {(int)response.StatusCode} {response.StatusCode}");
+                OnError?.Invoke(ex.Message, ex);
                 throw ex;
             }
 
-            response.EnsureSuccessStatusCode();
+            var contentType = response.Content.Headers.ContentType?.MediaType;
+            if (contentType != "text/event-stream")
+                OnLog?.Invoke($"[SSE] Warning: Expected 'text/event-stream', gor '{contentType}'");
 
             OnLog?.Invoke($"[SSE] Connected!");
             OnConnected?.Invoke();
 
+            try
+            {
+                await ReadStreamAsync(response, linkedCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                OnLog?.Invoke("[SSE] Stream reading canceled.");
+                throw;
+            }
+            finally
+            {
+                response.Dispose();
+                OnLog?.Invoke("[SSE] Disconnected!");
+                OnDisconnected?.Invoke();
+            }
+        }
+
+        private async Task ReadStreamAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+        {
             var stream = await response.Content.ReadAsStreamAsync();
             var reader = new StreamReader(stream);
 
             List<string> dataLines = new List<string>();
-            while (!reader.EndOfStream && !linkedCts.Token.IsCancellationRequested)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                var line = await reader.ReadLineAsync();
+                var readTask = reader.ReadLineAsync();
+                var timeoutTask = Task.Delay(_keepAliveTimeout, cancellationToken);
+
+                var completedTask = await Task.WhenAny(readTask, timeoutTask);
+
+                if (completedTask == timeoutTask)
+                {
+                    var ex = new TimeoutException($"[SSE] Keep-alive timeout: No message received for {_keepAliveTimeout.TotalSeconds}s");
+                    OnError?.Invoke(ex.Message, ex);
+                    throw ex;
+                }
+
+                string line;
+                try
+                {
+                    line = await readTask;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
 
                 if (line is null)
                     break;
@@ -95,7 +143,11 @@ namespace SseClientLib
                 }
 
                 if (line.StartsWith(":"))
+                {
+                    if (line.Contains("ping"))
+                        OnPing?.Invoke();
                     continue;
+                }
 
                 if (line.StartsWith("data:", StringComparison.Ordinal))
                 {
@@ -108,8 +160,6 @@ namespace SseClientLib
             }
 
             DispatchMessage(dataLines);
-            OnLog?.Invoke("[SSE] Disconnected!");
-            OnDisconnected?.Invoke();
         }
 
         private void DispatchMessage(List<string> dataLines)
