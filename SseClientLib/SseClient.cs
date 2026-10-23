@@ -1,4 +1,6 @@
-﻿using System.Net.Http.Headers;
+﻿using System.Reflection;
+using System.Diagnostics;
+using System.Net.Http.Headers;
 
 namespace SseClientLib;
 
@@ -23,7 +25,7 @@ public class SseClient : IDisposable
     public SseClient(string endpointBase, string query, TimeSpan? keepAliveTimeout = null)
     {
         if (string.IsNullOrWhiteSpace(endpointBase))
-            throw new ArgumentException("Endpoint cannot be null or empty.", nameof(endpointBase));
+            throw new ArgumentException("[SSE] Endpoint cannot be null or empty.", nameof(endpointBase));
 
         if (!Uri.TryCreate(endpointBase, UriKind.Absolute, out _))
             throw new ArgumentException("[SSE] Endpoint must be an absolute URL.", nameof(endpointBase));
@@ -39,11 +41,29 @@ public class SseClient : IDisposable
         _client = new HttpClient();
     }
 
-    public async Task ConnectAsync(CancellationToken cancellationToken = default)
+    public async Task ConnectAsync(FileVersionInfo libraryInfo, FileVersionInfo? externalCallerInfo = null, CancellationToken cancellationToken = default)
     {
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
 
         using var request = new HttpRequestMessage(HttpMethod.Get, _endpoint);
+
+        Assembly executingAssembly = Assembly.GetExecutingAssembly();
+        FileVersionInfo executingInfo = FileVersionInfo.GetVersionInfo(executingAssembly.Location);
+        request.Headers.Add("SseClientLib", $"{executingInfo.ProductName}v{executingInfo.ProductVersion}");
+
+        request.Headers.Add("AltStreamLib", $"{libraryInfo.ProductName}v{libraryInfo.ProductVersion}");
+
+        if (externalCallerInfo != null)
+            request.Headers.Add("CallingAssembly", $"{externalCallerInfo.ProductName}v{externalCallerInfo.ProductVersion}");
+
+        Assembly? entryAssembly = Assembly.GetEntryAssembly();
+        if (entryAssembly != null)
+        {
+            FileVersionInfo? entryInfo = FileVersionInfo.GetVersionInfo(entryAssembly.Location);
+            if (entryInfo != null)
+                request.Headers.Add("EntryAssembly", $"{entryInfo.ProductName}v{entryInfo.ProductVersion}");
+        }
+
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
         OnLog?.Invoke($"[SSE] Connecting...");
@@ -75,7 +95,7 @@ public class SseClient : IDisposable
 
         var contentType = response.Content.Headers.ContentType?.MediaType;
         if (contentType != "text/event-stream")
-            OnLog?.Invoke($"[SSE] Warning: Expected 'text/event-stream', gor '{contentType}'");
+            OnLog?.Invoke($"[SSE] Warning: Expected 'text/event-stream', got '{contentType}'");
 
         OnLog?.Invoke($"[SSE] Connected!");
         OnConnected?.Invoke();
