@@ -14,6 +14,7 @@ namespace SseClientLib
     {
         private readonly HttpClient _client;
         private readonly Uri _endpoint;
+        private readonly string _header;
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
         private bool _disposed;
 
@@ -28,48 +29,35 @@ namespace SseClientLib
         public event Action<string> OnLog;
         public event Action<string, Exception> OnError;
 
-        public SseClient(string endpointBase, string query, TimeSpan? keepAliveTimeout = null)
+        public SseClient(string relativeEndpoint, string query, HttpClient client, TimeSpan? keepAliveTimeout = null)
         {
-            if (string.IsNullOrWhiteSpace(endpointBase))
-                throw new ArgumentException("[SSE] Endpoint cannot be null or empty.", nameof(endpointBase));
+            if (string.IsNullOrWhiteSpace(relativeEndpoint))
+                throw new ArgumentException("[SSE] Endpoint cannot be null or empty.", nameof(relativeEndpoint));
 
-            if (!Uri.TryCreate(endpointBase, UriKind.Absolute, out _))
-                throw new ArgumentException("[SSE] Endpoint must be an absolute URL.", nameof(endpointBase));
+            if (client.BaseAddress is null)
+                throw new InvalidOperationException("[SSE] HttpClient.BaseAddress must be configured on the provided client.");
 
-            var builder = new UriBuilder(endpointBase);
+            var builder = new UriBuilder(new Uri(client.BaseAddress, relativeEndpoint));
             var existingQuery = builder.Query.TrimStart('?');
 
             builder.Query = string.IsNullOrEmpty(existingQuery)
                 ? query : $"{existingQuery}&{query}";
 
+            Assembly executingAssembly = Assembly.GetExecutingAssembly();
+            FileVersionInfo executingInfo = FileVersionInfo.GetVersionInfo(executingAssembly.Location);
+            _header = $"{executingInfo.ProductName}v{executingInfo.ProductVersion}";
+
             _endpoint = builder.Uri;
             _keepAliveTimeout = keepAliveTimeout ?? TimeSpan.FromSeconds(30);
-            _client = new HttpClient();
+            _client = client;
         }
 
-        public async Task ConnectAsync(FileVersionInfo libraryInfo, FileVersionInfo externalCallerInfo = null, CancellationToken cancellationToken = default)
+        public async Task ConnectAsync(CancellationToken cancellationToken = default)
         {
             var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
 
             var request = new HttpRequestMessage(HttpMethod.Get, _endpoint);
-
-            Assembly executingAssembly = Assembly.GetExecutingAssembly();
-            FileVersionInfo executingInfo = FileVersionInfo.GetVersionInfo(executingAssembly.Location);
-            request.Headers.Add("SseClientLib", $"{executingInfo.ProductName}v{executingInfo.ProductVersion}");
-
-            request.Headers.Add("AltStreamLib", $"{libraryInfo.ProductName}v{libraryInfo.ProductVersion}");
-
-            if (externalCallerInfo != null)
-                request.Headers.Add("CallingAssembly", $"{externalCallerInfo.ProductName}v{externalCallerInfo.ProductVersion}");
-
-            Assembly? entryAssembly = Assembly.GetEntryAssembly();
-            if (entryAssembly != null)
-            {
-                FileVersionInfo? entryInfo = FileVersionInfo.GetVersionInfo(entryAssembly.Location);
-                if (entryInfo != null)
-                    request.Headers.Add("EntryAssembly", $"{entryInfo.ProductName}v{entryInfo.ProductVersion}");
-            }
-
+            request.Headers.Add("SseClientLib", _header);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
             OnLog?.Invoke($"[SSE] Connecting...");
@@ -201,7 +189,6 @@ namespace SseClientLib
             _disposed = true;
             _cts.Cancel();
             _cts.Dispose();
-            _client.Dispose();
         }
     }
 }
