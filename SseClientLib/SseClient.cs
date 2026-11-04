@@ -157,6 +157,9 @@ namespace SseClientLib
                     continue;
                 }
 
+                if (line.StartsWith("id:"))
+                    continue;
+
                 if (line.StartsWith("data:", StringComparison.Ordinal))
                 {
                     var data = line.Substring(5);
