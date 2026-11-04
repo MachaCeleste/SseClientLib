@@ -151,6 +151,9 @@ public class SseClient : IDisposable
                 continue;
             }
 
+            if (line.StartsWith("id:"))
+                continue;
+
             if (line.StartsWith("data:", StringComparison.Ordinal))
             {
                 var data = line[5..];
