@@ -1,190 +1,230 @@
-﻿using System.Reflection;
-using System.Diagnostics;
+﻿#if NET481
+using System;
+using System.IO;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Net.Http;
+#endif
 using System.Net.Http.Headers;
+using System.Reflection;
+using System.Diagnostics;
 
-namespace SseClientLib;
-
-public class SseClient : IDisposable
+namespace SseClientLib
 {
-    private readonly HttpClient _client;
-    private readonly Uri _endpoint;
-    private readonly string _header;
-    private readonly CancellationTokenSource _cts = new();
-    private bool _disposed;
-
-    private readonly TimeSpan _keepAliveTimeout;
-
-    public event Action? OnConnected;
-    public event Action? OnDisconnected;
-
-    public event Action? OnPing;
-    public event Action<string>? OnRawMessageReceived;
-
-    public event Action<string>? OnLog;
-    public event Action<string, Exception>? OnError;
-
-    public SseClient(string relativeEndpoint, string query, HttpClient client, TimeSpan? keepAliveTimeout = null)
+    public class SseClient : IDisposable
     {
-        if (string.IsNullOrWhiteSpace(relativeEndpoint))
-            throw new ArgumentException("[SSE] Endpoint cannot be null or empty.", nameof(relativeEndpoint));
+        private readonly HttpClient _client;
+        private readonly Uri _endpoint;
+        private readonly string _header;
+        private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+        private bool _disposed;
 
-        if (client.BaseAddress is null)
-            throw new InvalidOperationException("[SSE] HttpClient.BaseAddress must be configured on the provided client.");
+        private readonly TimeSpan _keepAliveTimeout;
 
-        var builder = new UriBuilder(new Uri(client.BaseAddress, relativeEndpoint));
-        var existingQuery = builder.Query.TrimStart('?');
+#if NET481
 
-        builder.Query = string.IsNullOrEmpty(existingQuery)
-            ? query : $"{existingQuery}&{query}";
+        public event Action OnConnected;
+        public event Action OnDisconnected;
 
-        Assembly executingAssembly = Assembly.GetExecutingAssembly();
-        FileVersionInfo executingInfo = FileVersionInfo.GetVersionInfo(executingAssembly.Location);
-        _header = $"{executingInfo.ProductName}v{executingInfo.ProductVersion}";
+        public event Action OnPing;
+        public event Action<string> OnRawMessageReceived;
 
-        _endpoint = builder.Uri;
-        _keepAliveTimeout = keepAliveTimeout ?? TimeSpan.FromSeconds(30);
-        _client = client;
-    }
+        public event Action<string> OnLog;
+        public event Action<string, Exception> OnError;
+#elif NET9_0_OR_GREATER
+        public event Action? OnConnected;
+        public event Action? OnDisconnected;
 
-    public async Task ConnectAsync(CancellationToken cancellationToken = default)
-    {
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
+        public event Action? OnPing;
+        public event Action<string>? OnRawMessageReceived;
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, _endpoint);
-        request.Headers.Add("SseClientLib", _header);
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+        public event Action<string>? OnLog;
+        public event Action<string, Exception>? OnError;
+#endif
 
-        OnLog?.Invoke($"[SSE] Connecting...");
-
-        HttpResponseMessage response;
-        try
+        public SseClient(string relativeEndpoint, string query, HttpClient client, TimeSpan? keepAliveTimeout = null)
         {
-            response = await _client.SendAsync(request,
-                HttpCompletionOption.ResponseHeadersRead,
-                linkedCts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            OnLog?.Invoke($"[SSE] Connection canceled.");
-            throw;
-        }
-        catch (Exception ex)
-        {
-            OnError?.Invoke($"[SSE] Connection Error: {ex.Message}", ex);
-            throw;
-        }
+            if (string.IsNullOrWhiteSpace(relativeEndpoint))
+                throw new ArgumentException("[SSE] Endpoint cannot be null or empty.", nameof(relativeEndpoint));
 
-        if (!response.IsSuccessStatusCode)
-        {
-            var ex = new HttpRequestException($"[SSE] HTTP {(int)response.StatusCode} {response.StatusCode}");
-            OnError?.Invoke(ex.Message, ex);
-            throw ex;
+            if (client.BaseAddress is null)
+                throw new InvalidOperationException("[SSE] HttpClient.BaseAddress must be configured on the provided client.");
+
+            var builder = new UriBuilder(new Uri(client.BaseAddress, relativeEndpoint));
+            var existingQuery = builder.Query.TrimStart('?');
+
+            builder.Query = string.IsNullOrEmpty(existingQuery)
+                ? query : $"{existingQuery}&{query}";
+
+            Assembly executingAssembly = Assembly.GetExecutingAssembly();
+            FileVersionInfo executingInfo = FileVersionInfo.GetVersionInfo(executingAssembly.Location);
+            _header = $"{executingInfo.ProductName}v{executingInfo.ProductVersion}";
+
+            _endpoint = builder.Uri;
+            _keepAliveTimeout = keepAliveTimeout ?? TimeSpan.FromSeconds(30);
+            _client = client;
         }
 
-        var contentType = response.Content.Headers.ContentType?.MediaType;
-        if (contentType != "text/event-stream")
-            OnLog?.Invoke($"[SSE] Warning: Expected 'text/event-stream', got '{contentType}'");
-
-        OnLog?.Invoke($"[SSE] Connected!");
-        OnConnected?.Invoke();
-
-        try
+        public async Task ConnectAsync(CancellationToken cancellationToken = default)
         {
-            await ReadStreamAsync(response, linkedCts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            OnLog?.Invoke("[SSE] Stream reading canceled.");
-            throw;
-        }
-        finally
-        {
-            response.Dispose();
-            OnLog?.Invoke("[SSE] Disconnected!");
-            OnDisconnected?.Invoke();
-        }
-    }
+#if NET481
+            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
 
-    private async Task ReadStreamAsync(HttpResponseMessage response, CancellationToken cancellationToken)
-    {
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        using var reader = new StreamReader(stream);
+            var request = new HttpRequestMessage(HttpMethod.Get, _endpoint);
+#elif NET9_0_OR_GREATER
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
 
-        List<string> dataLines = [];
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            var readTask = reader.ReadLineAsync(cancellationToken).AsTask();
-            var timeoutTask = Task.Delay(_keepAliveTimeout, cancellationToken);
+            using var request = new HttpRequestMessage(HttpMethod.Get, _endpoint);
+#endif
+            request.Headers.Add("SseClientLib", _header);
+            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
-            var completedTask = await Task.WhenAny(readTask, timeoutTask);
+            OnLog?.Invoke($"[SSE] Connecting...");
 
-            if (completedTask == timeoutTask)
+            HttpResponseMessage response;
+            try
             {
-                var ex = new TimeoutException($"[SSE] Keep-alive timeout: No message received for {_keepAliveTimeout.TotalSeconds}s");
+                response = await _client.SendAsync(request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    linkedCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                OnLog?.Invoke($"[SSE] Connection canceled.");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                OnError?.Invoke($"[SSE] Connection Error: {ex.Message}", ex);
+                throw;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var ex = new HttpRequestException($"[SSE] HTTP {(int)response.StatusCode} {response.StatusCode}");
                 OnError?.Invoke(ex.Message, ex);
                 throw ex;
             }
 
-            string? line;
+            var contentType = response.Content.Headers.ContentType?.MediaType;
+            if (contentType != "text/event-stream")
+                OnLog?.Invoke($"[SSE] Warning: Expected 'text/event-stream', got '{contentType}'");
+
+            OnLog?.Invoke($"[SSE] Connected!");
+            OnConnected?.Invoke();
+
             try
             {
-                line = await readTask;
+                await ReadStreamAsync(response, linkedCts.Token);
             }
             catch (OperationCanceledException)
             {
+                OnLog?.Invoke("[SSE] Stream reading canceled.");
                 throw;
             }
-
-            if (line is null)
-                break;
-
-            if (line.Length == 0)
+            finally
             {
-                DispatchMessage(dataLines);
-                continue;
-            }
-
-            if (line.StartsWith(':'))
-            {
-                if (line.Contains("ping", StringComparison.OrdinalIgnoreCase))
-                    OnPing?.Invoke();
-                continue;
-            }
-
-            if (line.StartsWith("id:"))
-                continue;
-
-            if (line.StartsWith("data:", StringComparison.Ordinal))
-            {
-                var data = line[5..];
-                if (data.StartsWith(' '))
-                    data = data[1..];
-
-                dataLines.Add(data);
+                response.Dispose();
+                OnLog?.Invoke("[SSE] Disconnected!");
+                OnDisconnected?.Invoke();
             }
         }
 
-        DispatchMessage(dataLines);
-    }
+        private async Task ReadStreamAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+        {
+#if NET481
+            var stream = await response.Content.ReadAsStreamAsync();
+            var reader = new StreamReader(stream);
+#elif NET9_0_OR_GREATER
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var reader = new StreamReader(stream);
+#endif
 
-    private void DispatchMessage(List<string> dataLines)
-    {
-        if (dataLines.Count == 0)
-            return;
+            List<string> dataLines = new List<string>();
+            while (!cancellationToken.IsCancellationRequested)
+            {
+#if NET481
+                var readTask = reader.ReadLineAsync();
+#elif NET9_0_OR_GREATER
+                var readTask = reader.ReadLineAsync(cancellationToken).AsTask();
+#endif
+                var timeoutTask = Task.Delay(_keepAliveTimeout, cancellationToken);
 
-        var message = string.Join("\n", dataLines);
-        dataLines.Clear();
+                var completedTask = await Task.WhenAny(readTask, timeoutTask);
 
-        OnRawMessageReceived?.Invoke(message);
-    }
+                if (completedTask == timeoutTask)
+                {
+                    var ex = new TimeoutException($"[SSE] Keep-alive timeout: No message received for {_keepAliveTimeout.TotalSeconds}s");
+                    OnError?.Invoke(ex.Message, ex);
+                    throw ex;
+                }
 
-    public void Dispose()
-    {
-        if (_disposed)
-            return;
+#if NET481
+                string line;
+#elif NET9_0_OR_GREATER
+                string? line;
+#endif
+                try
+                {
+                    line = await readTask;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
 
-        _disposed = true;
-        _cts.Cancel();
-        _cts.Dispose();
+                if (line is null)
+                    break;
+
+                if (line.Length == 0)
+                {
+                    DispatchMessage(dataLines);
+                    continue;
+                }
+
+                if (line.StartsWith(":"))
+                {
+                    if (line.Contains("ping"))
+                        OnPing?.Invoke();
+                    continue;
+                }
+
+                if (line.StartsWith("id:"))
+                    continue;
+
+                if (line.StartsWith("data:", StringComparison.Ordinal))
+                {
+                    var data = line.Substring(5);
+                    if (data.StartsWith(" "))
+                        data = data.Substring(1);
+
+                    dataLines.Add(data);
+                }
+            }
+
+            DispatchMessage(dataLines);
+        }
+
+        private void DispatchMessage(List<string> dataLines)
+        {
+            if (dataLines.Count == 0)
+                return;
+
+            var message = string.Join("\n", dataLines);
+            dataLines.Clear();
+
+            OnRawMessageReceived?.Invoke(message);
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            _disposed = true;
+            _cts.Cancel();
+            _cts.Dispose();
+        }
     }
 }
