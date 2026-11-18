@@ -1,4 +1,4 @@
-﻿#if NET46 || NET472 || NET481
+﻿#if NET461 || NET472 || NET481
 using System;
 using System.IO;
 using System.Collections.Generic;
@@ -22,7 +22,7 @@ namespace SseClientLib
 
         private readonly TimeSpan _keepAliveTimeout;
 
-#if NET46 || NET472 || NET481
+#if NET461 || NET472 || NET481
         public event Action OnConnected;
         public event Action OnDisconnected;
 
@@ -67,7 +67,7 @@ namespace SseClientLib
 
         public async Task ConnectAsync(CancellationToken cancellationToken = default)
         {
-#if NET46 || NET472 || NET481
+#if NET461 || NET472 || NET481
             var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
 
             var request = new HttpRequestMessage(HttpMethod.Get, _endpoint);
@@ -132,7 +132,7 @@ namespace SseClientLib
 
         private async Task ReadStreamAsync(HttpResponseMessage response, CancellationToken cancellationToken)
         {
-#if NET46 || NET472 || NET481
+#if NET461 || NET472 || NET481
             var stream = await response.Content.ReadAsStreamAsync();
             var reader = new StreamReader(stream);
 #elif NET9_0_OR_GREATER
@@ -143,7 +143,7 @@ namespace SseClientLib
             List<string> dataLines = new List<string>();
             while (!cancellationToken.IsCancellationRequested)
             {
-#if NET46 || NET472 || NET481
+#if NET461 || NET472 || NET481
                 var readTask = reader.ReadLineAsync();
 #elif NET9_0_OR_GREATER
                 var readTask = reader.ReadLineAsync(cancellationToken).AsTask();
@@ -159,7 +159,7 @@ namespace SseClientLib
                     throw ex;
                 }
 
-#if NET46 || NET472 || NET481
+#if NET461 || NET472 || NET481
                 string line;
 #elif NET9_0_OR_GREATER
                 string? line;
